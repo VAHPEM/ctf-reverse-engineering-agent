@@ -151,6 +151,14 @@ MEMORY_SPAN = 4
 
 KNOWN_CAP = 70          # prompt-size guard on measured facts; seeded/pinned facts
                         # (task + environment + method) are NEVER trimmed
+KNOWN_EVICT_BATCH = 15  # when KNOWN_CAP is hit, evict this many EXTRA oldest facts at
+                        # once: KNOWN is the cached head of the user message, and each
+                        # eviction invalidates that cache from the first fact onward
+# Cache the ARTIFACTS+KNOWN head of the per-step user message (Anthropic cache_control
+# on the last KNOWN fact). MEASURED ch4 run 2026-09-27: KNOWN grew append-only on 19/19
+# step transitions and was ~17% of all per-step state chars, all of it re-billed at
+# full price every step. CACHE_LEDGER=0 turns it off (A/B, or to rule it out).
+CACHE_LEDGER = os.environ.get("CACHE_LEDGER", "1").strip() != "0"
 ASSUMED_CAP = 16        # keep the newest N Brain notes in the ledger (prompt-size guard)
 RULED_OUT_CAP = 15      # keep the newest N ruled-out entries
 # The ledger is the UNCACHED half of every step's prompt - it is re-sent, in full, on

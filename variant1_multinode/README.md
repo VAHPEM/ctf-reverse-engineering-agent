@@ -16,3 +16,8 @@ Run:
     OLLAMA_HOST=http://<local-model-host>:11434 python3 graph_skeleton.py <path-to-file>
 
 Shared secrets live at the repo root (../.env, ../.ssh_keys).
+
+## Rule for contributors
+
+Every new function, rule, env knob or dependency is documented in this README **and** the
+root README in the same change.

@@ -11,11 +11,56 @@ Canonical think → act → observe loop over a compressed Ledger
 tokens than variant 1 but needs little local compute.
 
 See the [repo root README](../README.md) for full setup (dependencies, VM tooling, AI
-models, `.env`, and configuring flag detection per CTF) and the complete tool catalog.
+models, `.env`, and configuring flag detection per CTF) and the complete tool catalog
+(29 Muscle tools).
 
 Run (from this folder):
-    python3 -m agent.run <path-to-file>          # e.g. ../challenges/09_neonoutrun
+    python3 -m agent.run <path-to-file>          # e.g. ../challenges/ch4/ToxicMiner.exe
     MAX_STEPS=40 python3 -m agent.run <path>      # raise the per-run step budget
     python3 -m agent.run <path> --resume          # resume from the last state dump
+    python3 -m agent.run <path> 2>&1 | tee ../run.log   # keep a log to compare runs
 
 Shared secrets live at the repo root (../.env, ../.ssh_keys).
+
+## Brain tiers (orchestrator.py)
+
+Two models: `BRAIN_MODEL` (default) and `BRAIN_TOP_MODEL` (top). Only code switches them:
+
+- `_handle_stall()` — 2 consecutive analysis stalls (no new KNOWN) → escalate
+  default → top; at top → **stop**. After `PIN_TOP_AFTER_ESCALATIONS` (2) escalations the
+  top model is **pinned** for the rest of the run.
+- `_handle_tool_errors()` — 3 consecutive operational errors (path/host, Frida syntax,
+  timeout, SSH drop, crash) → escalate to top only to **repair the call**; at top → stop.
+  Does not count as an escalation and never pins.
+- De-escalation (loop in `solve()`) — 5 consecutive progressed steps at top, not
+  pinned → back to default.
+- Each tier switch re-writes the prompt cache for the other model (~23.5k tokens).
+
+Full table: [root README → Brain tiers](../README.md#brain-tiers--escalation--de-escalation).
+
+## Measurement & prompt caching
+
+- `agent/metrics.py` — observe-only per-step measurement; prints `=== METRICS ===` at the
+  end of a run and writes `_metrics.json` (section sizes, tokens, Brain vs tool seconds,
+  reusable cache head). Compare runs of the same challenge before/after a change.
+- `CACHE_LEDGER=1` (default) — `Workspace.render_state_parts()` + `reasoner._ledger_blocks()`
+  send ARTIFACTS + KNOWN as a cached prefix (one block per KNOWN fact, breakpoint on the
+  last). State order is most-stable-first; ASSUMED is not cached (sliding window); KNOWN
+  is evicted in batches of `KNOWN_EVICT_BATCH`. `CACHE_LEDGER=0` turns it off.
+- `reasoner.estimate_call()` — 1.6 chars/token for state, 2.4 for the system prompt
+  (measured; hex/disassembly tokenize badly).
+
+Details and measured numbers: [root README → Cost & speed](../README.md#cost--speed-measurement-and-prompt-caching).
+
+## run_cmd and grep's exit 1
+
+`tools._grep_shape()` reads an empty exit-1 from a single grep pipeline as **NO MATCH**
+(a measured negative in KNOWN, not a tool error) and flags a grep with no file operand.
+`tools._cmd_label()` shows commands up to 110 chars and marks any cut outside the
+backticks. Measured reason: ch4 run 2 escalated to Opus on three honest "no match"
+greps, then wasted 4 steps "fixing" a quoting bug that was only the 55-char display cut.
+
+## Rule for contributors
+
+Every new function, rule, env knob or dependency is documented in this README **and** the
+root README in the same change.

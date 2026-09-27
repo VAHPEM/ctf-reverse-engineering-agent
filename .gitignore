@@ -22,4 +22,5 @@ samples/
 # Run scratch / logs (regenerated each run)
 *.log
 _run_state.json
+_metrics.json
 Claude outputs/

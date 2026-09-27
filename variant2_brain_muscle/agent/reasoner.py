@@ -71,11 +71,23 @@ def budget_room(estimated_tokens):
     return estimated_tokens <= left, left
 
 
+# chars per token, MEASURED ch4 run (2026-09-27, _metrics.json, 20 steps): the per-step
+# state is hex dumps / disassembly / addresses, which tokenize badly - 1.64..1.98
+# chars/token (1.86 overall), NOT the ~3 assumed before. The cached system prompt +
+# tool catalog (58.8k chars) billed 23,544 cache-write tokens = ~2.5 chars/token, NOT
+# ~4. The old ratios under-estimated a call by ~40%, so MAX_RUN_TOKENS could be
+# overshot. Use the low end of the measured range: this is a worst-case guard.
+USER_CHARS_PER_TOKEN = 1.6
+SYSTEM_CHARS_PER_TOKEN = 2.4
+
+
 def estimate_call(user_chars, system_chars, max_out):
     """Worst case for one call, in the units total_tokens() counts (input + output +
-    cache reads/writes, all summed). ~3 chars/token for the dynamic part and ~4 for the
-    prose-heavy system prompt, and the FULL output ceiling, because a reply can use it."""
-    return int(user_chars / 3) + int(system_chars / 4) + int(max_out)
+    cache reads/writes, all summed): dynamic part at USER_CHARS_PER_TOKEN, system
+    prompt at SYSTEM_CHARS_PER_TOKEN, and the FULL output ceiling, because a reply can
+    use it."""
+    return (int(user_chars / USER_CHARS_PER_TOKEN)
+            + int(system_chars / SYSTEM_CHARS_PER_TOKEN) + int(max_out))
 
 
 def usage_summary():
@@ -531,9 +543,41 @@ def _system_blocks(static_text, run_text):
     return blocks
 
 
+_DECIDE_PREAMBLE = (
+    "Based ONLY on the current state below, choose the SINGLE next action. One "
+    "measurable step, then you will be called again. Reply with exactly one JSON "
+    "object, in the form given in your instructions - nothing else.\n\n")
+
+
+def _ledger_blocks(parts, image, tail_extra):
+    """User content with the stable head cached (config.CACHE_LEDGER).
+
+    parts = Workspace.render_state_parts(): (head_pieces, tail). One text block per
+    head piece (ARTIFACTS, then one per KNOWN fact) and a cache breakpoint on the last
+    one. KNOWN only grows at its end, so the previous step's breakpoint position is
+    still a block boundary this step: the API's lookback (it checks earlier block
+    boundaries, ~20 back) finds that cached prefix and bills it as a cache READ; only
+    the facts added since are written. Plain 5-minute TTL on purpose - steps are
+    seconds apart, and a longer TTL costs 2x on every write. The text the model reads
+    is byte-identical to the plain-string prompt; only the block boundaries differ."""
+    head, tail = parts
+    blocks = [{"type": "text", "text": _DECIDE_PREAMBLE + head[0]}]
+    blocks += [{"type": "text", "text": p} for p in head[1:]]
+    blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    if image:            # after the cached head: a one-shot image must not break it
+        blocks.append({"type": "image", "source": {
+            "type": "base64", "media_type": image.get("media_type", "image/png"),
+            "data": image["data"]}})
+    blocks.append({"type": "text", "text": tail + tail_extra})
+    return blocks
+
+
 def decide(state_text, catalog_text=None, strict=False, tier="default", image=None,
-           correction=""):
-    """CONTROLLER: choose the single next action from the ledger (one Brain call)."""
+           correction="", parts=None):
+    """CONTROLLER: choose the single next action from the ledger (one Brain call).
+    parts (optional) = Workspace.render_state_parts() for the same state: when given
+    and the model is Anthropic, the stable head of the state is sent as a cached
+    prefix (see _ledger_blocks)."""
     strict_note = ""
     if strict:
         cut = last_call_truncated()
@@ -544,14 +588,8 @@ def decide(state_text, catalog_text=None, strict=False, tier="default", image=No
                             "analysis into `why`/`note`. Do NOT do that here: emit the "
                             "JSON action FIRST, keep `note` under 200 chars, and put any "
                             "long derivation inside a solver via author_and_run instead.\n")
-    user = (
-        "Based ONLY on the current state below, choose the SINGLE next action. One "
-        "measurable step, then you will be called again. Reply with exactly one JSON "
-        "object, in the form given in your instructions - nothing else.\n\n"
-        f"{state_text}"
-        f"{strict_note}"
-        + (("\n" + correction + "\n") if correction else "")
-    )
+    tail_extra = f"{strict_note}" + (("\n" + correction + "\n") if correction else "")
+    user = _DECIDE_PREAMBLE + f"{state_text}" + tail_extra
     # Everything that does not change between steps (the reply format, the limits, the
     # note guidance) now lives in the CACHED system block above: it was ~1.9KB of
     # byte-identical text sitting in the UNCACHED user message, re-sent on every single
@@ -561,7 +599,10 @@ def decide(state_text, catalog_text=None, strict=False, tier="default", image=No
     # provider-specific; openai/ollama would need a different shape - skip it there rather
     # than send a malformed request).
     model = config.LOGIC_MODEL[tier]
-    if image and _provider(model) == "anthropic":
+    if (parts and config.CACHE_LEDGER and _provider(model) == "anthropic"
+            and "".join(parts[0]) + parts[1] == state_text):
+        content = _ledger_blocks(parts, image, tail_extra)
+    elif image and _provider(model) == "anthropic":
         content = [
             {"type": "image", "source": {"type": "base64",
                                          "media_type": image.get("media_type", "image/png"),

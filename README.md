@@ -26,6 +26,7 @@ It has been tested and used in practice on:
 1. [The two variants](#the-two-variants)
 2. [How it works](#how-it-works)
    - [variant2 — Brain + Muscle](#variant2--brain--muscle-active)
+   - [Brain tiers — escalation & de-escalation](#brain-tiers--escalation--de-escalation)
    - [variant1 — multi-node pipeline](#variant1--multi-node-pipeline-legacy)
 3. [The Muscle toolset](#the-muscle-toolset)
 4. [The recall knowledge base](#the-recall-knowledge-base)
@@ -39,8 +40,9 @@ It has been tested and used in practice on:
    - [The `.env` file (API keys & VM addresses)](#6-the-env-file-api-keys--vm-addresses)
    - [Flag detection per CTF](#7-flag-detection-per-ctf)
 7. [Running it](#running-it)
-8. [Design principles](#design-principles)
-9. [License & scope](#license--scope)
+8. [Cost & speed: measurement and prompt caching](#cost--speed-measurement-and-prompt-caching)
+9. [Design principles](#design-principles)
+10. [License & scope](#license--scope)
 
 ---
 
@@ -96,10 +98,29 @@ strong model in charge; **variant1** (legacy) splits the work across cheap local
   rather than guess**); a tool-error budget; and anti-loop nudges that stop the Brain
   re-reading the same bytes instead of writing the solver.
 - **Two tiers, one seam** — a default model does the bulk of the work; on repeated stalls
-  the run escalates to a stronger *top* model, then de-escalates on progress. Dispatch is
+  the run escalates to a stronger *top* model, then de-escalates on progress (exact rules:
+  [Brain tiers](#brain-tiers--escalation--de-escalation)). Dispatch is
   by model-name prefix (`claude-*` → Anthropic, `gpt-*`/`o*` → OpenAI). **The Claude path
   is what has been tested in practice; the OpenAI path is implemented but not yet exercised
   end-to-end** (see `variant2_brain_muscle/smoke_openai.py` for a standalone check).
+
+### Brain tiers — escalation & de-escalation
+
+variant2 runs two models: `BRAIN_MODEL` (the **default** tier, does the bulk of the work)
+and `BRAIN_TOP_MODEL` (the **top** tier, stronger and more expensive). Only code moves the
+run between them (`agent/orchestrator.py`) — the model never picks its own tier.
+
+| Trigger | Where | Effect |
+|---|---|---|
+| `STALL_THRESHOLD` (2) consecutive **analysis stalls** — the tool worked but showed nothing new (< `INFO_MIN_CHARS` of never-seen text), or repeated / re-read the same data | `_handle_stall()` | default → **top**, `ws.escalations += 1`, and a "change the KIND of approach" nudge. Already at top → the run **stops** (stuck at top ⇒ stop, don't guess). |
+| `PIN_TOP_AFTER_ESCALATIONS` (default 2) analysis escalations in one run | `_handle_stall()` | `ws.pinned_top = True`: the top model keeps the endgame and never de-escalates again (fixes the default↔top flip-flop measured on ch7/ch8). |
+| `TOOL_ERROR_BUDGET` (3) consecutive **operational** errors — wrong path/host, Frida/JS syntax, timeout, SSH/SFTP drop, tool crash | `_handle_tool_errors()` | default → **top** only to *repair the call* ("fix the call, not the plan" nudge). Not counted as an escalation, never pins. Already at top → stop (the tool/target is broken). |
+| The controller cannot form a valid JSON action even after in-step re-asks | `_acquire_action()` → `_handle_stall()` | escalates like a stall. |
+| `DEESCALATE_AFTER` (5) consecutive **progressed** steps at top, not pinned | main loop of `solve()` | top → **default** (`.. 5 steps of real progress -> back to DEFAULT tier`). Two fresh stalls escalate again. |
+
+Cost note: Anthropic's prompt cache is **per model**, so every tier switch pays one fresh
+cache write of the system prompt (~23.5k tokens measured). A spurious escalation is the
+single most expensive event in a run.
 
 ### variant1 — multi-node pipeline (legacy)
 
@@ -143,6 +164,14 @@ output, and never interpret.
 - `triage` — first-look survey of an input (file type, sections, entropy, imports, strings).
 - `peek` / `read_file` — read bytes / paged text of an artifact or a produced file.
 - `run_cmd` — run one shell command on a VM (real timeout, exit code, new-file detection).
+  grep's exit-status convention is honoured (`_grep_shape()` in `tools.py`): a single
+  pipeline with a `grep`/`egrep`/`fgrep`/`zgrep`/`rg` stage that exits 1 with no output is
+  a **`NO MATCH`** result — a measured negative recorded in KNOWN, not a tool error (two
+  empty searches in a row still count as a stall, by design). A `grep` given **no file**
+  (it would read an empty stdin) is reported as exactly that. Commands chained with
+  `&&`/`||`/`;` keep exit 1 as a failure. In the ledger a long command is cut at 110
+  chars with the cut marked *outside* the backticks (`_cmd_label()`), so a truncated
+  command never looks like one with an unclosed quote.
 - `run_script` — run a whole Python/bash script the Brain wrote, on a VM.
 
 **Solve**
@@ -211,8 +240,10 @@ ctf-brain/
 ├── variant2_brain_muscle/       # ACTIVE agent
 │   ├── agent/
 │   │   ├── run.py               # entry point: python3 -m agent.run <file>
-│   │   ├── orchestrator.py      # the think→act→observe loop, budget & escalation
-│   │   ├── reasoner.py          # model dispatch, token accounting, Ledger
+│   │   ├── orchestrator.py      # the think→act→observe loop, budget & tier escalation
+│   │   ├── reasoner.py          # model dispatch, prompt caching, token accounting
+│   │   ├── workspace.py         # artifacts + the Ledger (KNOWN/ASSUMED/RULED-OUT), state render
+│   │   ├── metrics.py           # per-step token/section/time measurement (observe only)
 │   │   ├── tools.py             # the Muscle: every tool + flag detection (FLAG_RES)
 │   │   ├── remote.py            # SSH/SFTP to the Kali & Windows VMs
 │   │   └── config.py            # models, budgets, prompt facts, knobs
@@ -230,7 +261,8 @@ ctf-brain/
 ```
 
 Not committed (see `.gitignore`): `.env`, `.ssh_keys/`, `challenges/`, VM `samples/`, run
-logs, `knowledge/writeups/`, and other scratch.
+logs (`*.log`), run state (`_run_state.json`, `_metrics.json`), `knowledge/writeups/`, and
+other scratch.
 
 ---
 
@@ -322,6 +354,30 @@ python3 -m venv ~/ctf-venv
 
 The default interpreter is `~/ctf-venv/bin/python3`; if you put the venv elsewhere, set
 `KALI_PYTHON` in `.env`.
+
+**Optional — [pyghidra-mcp](https://github.com/clearbluejar/pyghidra-mcp)** (persistent
+Ghidra server). *Installed on the reference Kali VM but **not wired into the agent**.* It
+keeps one Ghidra JVM + project open, so a query costs ~0.3 s instead of ~2–5 s per
+`analyzeHeadless` call. Measured on ch4: tools are only 21–26% of a run's wall time and
+`decompile` ~2–5 s of it (the Brain is 74–79%), so it was **not worth integrating yet** —
+revisit if metrics show many Ghidra calls per run. Install into its **own** venv with
+Python 3.13 (JPype has no 3.14 wheel) and Ghidra's bundled `pyghidra` wheel:
+
+```bash
+python3.13 -m venv ~/pyghidra-venv
+~/pyghidra-venv/bin/pip install --no-index \
+    -f /usr/share/ghidra/Ghidra/Features/PyGhidra/pypkg/dist pyghidra
+~/pyghidra-venv/bin/pip install pyghidra-mcp pyghidra-mcp-cli
+
+export GHIDRA_INSTALL_DIR=/usr/share/ghidra
+~/pyghidra-venv/bin/pyghidra-mcp --transport streamable-http \
+    --project-path ~/ctf_work/pgm_proj --wait-for-analysis <binary>     # 127.0.0.1:8000
+~/pyghidra-venv/bin/pyghidra-mcp-cli list binaries                     # in another shell
+~/pyghidra-venv/bin/pyghidra-mcp-cli decompile --binary /<name> <function>
+```
+
+The first start downloads a 79 MB embedding model (`~/.cache/chroma`, semantic search).
+The JVM stays resident — stop the server when idle on a small VM.
 
 #### Windows VM — Windows targets (optional)
 
@@ -446,7 +502,9 @@ python3 -m agent.run ../challenges/09_neonoutrun
 - Input is a **file or a directory** (a directory's files are all ingested).
 - Raise the step budget for a run: `MAX_STEPS=40 python3 -m agent.run <path>`
 - Resume a previous run: `python3 -m agent.run <path> --resume [state.json]`
-- On finish it prints the flag (or `not found`) and a full token-usage breakdown.
+- On finish it prints the flag (or `not found`), a full token-usage breakdown and the
+  `METRICS` block (see [Cost & speed](#cost--speed-measurement-and-prompt-caching)).
+- Keep a log for later comparison: `python3 -m agent.run <path> 2>&1 | tee ../run.log`
 
 **variant1** (cheaper, local model):
 
@@ -465,8 +523,71 @@ OLLAMA_HOST=http://<model-host>:11434 python3 graph_skeleton.py <path-to-file>
 | `PIN_SMALL_FILES_MAX_CHARS` | `4000` | pin small input files into context to stop re-reads |
 | `INSPECT_NUDGE_AFTER` | `5` | nudge toward writing a solver after N read-only steps |
 | `ALLOW_LOCAL_BRAIN` | — | accept a local ollama Brain when `BRAIN_MODEL` is unset |
+| `CACHE_LEDGER` | `1` (on) | cache the ARTIFACTS+KNOWN head of each step's prompt; `0` = off (A/B) |
+| `CACHE_TTL` | empty (5 min) | TTL of the cached **system** prompt, e.g. `1h` (writes then cost 2×) |
+| `PIN_TOP_AFTER_ESCALATIONS` | `2` | analysis escalations before the top model is pinned for the run |
+| `METRICS_DUMP` | `_metrics.json` | where per-step measurements are written |
+| `STATE_DUMP` | `_run_state.json` | ledger snapshot per step (used by `--resume`) |
 
 (See `agent/config.py` for the full list.)
+
+---
+
+## Cost & speed: measurement and prompt caching
+
+### Step-0 metrics (`agent/metrics.py`)
+
+Every variant2 run ends with a `=== METRICS (step-0 measurement) ===` block and writes
+per-step detail to `_metrics.json`. It only **observes** (a failure inside it is swallowed,
+never breaks a run). Per step it records: the size of each section of the user message
+(KNOWN / ASSUMED / observations / …), provider-reported tokens (uncached in, out, cache
+read, cache write), Brain seconds vs tool seconds, and how much of the ARTIFACTS+KNOWN head
+is reusable from the previous step. Use it **before and after** any optimisation.
+
+Measured on FLARE-On 13 ch4 (20 steps): the Brain is **74–79% of wall time**, tools
+21–26% (36 s of that is one `pe_overview`); the uncached per-step state is ~50%
+observations, ~20% KNOWN, ~15% ASSUMED.
+
+### What is cached (Anthropic `cache_control`, max 4 breakpoints)
+
+1. the static system prompt (identity, discipline, playbook) — `CACHE_TTL`;
+2. the run context (environment facts, tool catalog, seeded notes) — `CACHE_TTL`;
+3. **the head of each step's user message**: ARTIFACTS + KNOWN (`CACHE_LEDGER`, plain
+   5-minute TTL). `Workspace.render_state_parts()` returns `(head_pieces, tail)`, one text
+   block per KNOWN fact, and `reasoner._ledger_blocks()` puts the breakpoint on the last
+   one. KNOWN only grows at its end, so last step's breakpoint is still a block boundary
+   and the API's ~20-block lookback finds that prefix: it is billed as a cache **read**
+   (0.1×); only the new facts are written.
+
+Rules that keep it working:
+
+- **Most-stable first.** State order is ARTIFACTS → KNOWN → | ASSUMED → RULED OUT →
+  observations → recent actions → stall nudge (the nudge used to be first).
+- **ASSUMED is not cached** — it is a sliding window (newest `ASSUMED_CAP`), so its start
+  changes every step.
+- **Evict in batches.** Past `KNOWN_CAP` (70) the oldest unpinned facts are dropped
+  `KNOWN_EVICT_BATCH` (15) extra at a time; one-per-step eviction would miss every step.
+- The text the model reads is byte-identical to the plain-string prompt; only block
+  boundaries differ. Non-Anthropic models get the plain string.
+
+Measured (ch4, run 1 without → run 2 with): uncached input per state character
+0.54 → 0.43 tokens (**~21% less**); per-step `cache_r` grows ~23.7k → ~25.5k while
+`cache_w` is ~50–150 tokens per step.
+
+### Token estimates (`MAX_RUN_TOKENS` guard)
+
+Hex dumps and disassembly tokenize badly: **1.6–2.0 chars/token** measured for the
+per-step state, ~2.5 for the system prompt + tool catalog (not the 3–4 of prose).
+`reasoner.estimate_call()` uses `USER_CHARS_PER_TOKEN = 1.6` and
+`SYSTEM_CHARS_PER_TOKEN = 2.4` so the budget guard over- rather than under-estimates.
+
+### Measured and deferred
+
+- **pyghidra-mcp** — saves ~2–4 s per Ghidra call ≈ 2% of a run (see the Kali section).
+- **`output_config.effort`** — output is only ~400 tokens per call; little to save.
+- **Lossy tool-output compressors** (e.g. Headroom) — rejected: a lost hex byte or address
+  breaks an RE solve; the agent already trims observations reversibly (re-read with
+  `peek`/`read_file`).
 
 ---
 
@@ -479,7 +600,14 @@ OLLAMA_HOST=http://<model-host>:11434 python3 graph_skeleton.py <path-to-file>
   analysis instead of repeating the search with a bigger regex.
 - **Stop rather than guess.** At the top tier with no progress, the run stops for a human
   instead of emitting a plausible-looking wrong flag.
-- **Change one thing at a time**, and verify each fix on a real run before the next.
+- **Change one thing at a time**, and verify each fix on a real run before the next —
+  with `metrics.py` numbers from the same challenge before and after.
+- **The Muscle never interprets.** Tools return raw output; conclusions are the Brain's.
+- **Only code changes the tier.** Escalate on measured stalls / tool-error budget,
+  de-escalate on measured progress, stop at the top instead of guessing.
+- **Prompt order = most stable first**, so the cacheable prefix stays byte-identical.
+- **Every new function, rule, knob or dependency goes into this README** and the README
+  of the variant it belongs to, in the same change.
 
 ---
 

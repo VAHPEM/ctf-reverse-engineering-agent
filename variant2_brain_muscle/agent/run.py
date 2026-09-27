@@ -38,3 +38,5 @@ if __name__ == "__main__":
     print("flag:", ws.flag if ws.flag else "(not found)")
     from .reasoner import usage_summary
     print("\n=== TOKEN USAGE ===\n" + usage_summary())
+    from .metrics import summary as metrics_summary
+    print("\n=== METRICS (step-0 measurement) ===\n" + metrics_summary())

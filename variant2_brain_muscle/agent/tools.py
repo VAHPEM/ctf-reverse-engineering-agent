@@ -939,10 +939,107 @@ def _peel_rc(text):
     return (text[:m.start()] + text[m.end():]).strip(), int(m.group(1))
 
 
-def _run_and_wrap(command, host, timeout, label):
+# grep's exit-status convention: 0 = matched, 1 = searched and found NOTHING, 2 = error.
+# MEASURED ch4 run 2 (2026-09-27): every "no match" came back as a FAILED run_cmd
+# ("exit 1, 0 chars"), so (a) three honest negative searches spent the tool-error budget
+# and escalated the Brain to Opus at step 6, and (b) with the command cut at 55 chars
+# in the ledger (`...grep -i '@flare-on.com` -> exit 1) the Brain concluded its quoting
+# was broken and burned steps 17-20 re-running a search that had already answered.
+_GREP_CMDS = {"grep", "egrep", "fgrep", "zgrep", "rg"}
+_GREP_ARG_OPTS = {"-e", "-f", "-m", "-A", "-B", "-C", "--regexp", "--file",
+                  "--max-count", "--context", "--after-context", "--before-context"}
+_REDIR_OPS = {">", ">>", "<", ">&", "<&", "&>", "&>>", "<<", "<<<", ">|"}
+_LABEL_MAX = 110
+
+
+def _cmd_label(command, limit=_LABEL_MAX):
+    """The command as it appears in the ledger. A cut is marked OUTSIDE the backticks,
+    so a truncated command can never look like a command with an unclosed quote."""
+    c = " ".join(str(command).split())
+    if len(c) <= limit:
+        return f"`{c}`"
+    return f"`{c[:limit]}`...(+{len(c) - limit} chars of the command not shown)"
+
+
+def _grep_shape(command):
+    """How grep's exit 1 should be read for a one-line KALI command:
+      'pipeline' - ONE pipeline (no && || ; &) with a grep-family stage, so with
+                   `set -o pipefail` an empty exit-1 result means "no match";
+      'no_file'  - that grep is the FIRST stage and has no file operand (and no -r),
+                   so it searched an EMPTY stdin - a call error, not a negative result;
+      None       - anything else (lists, subshells, unparsable): keep exit 1 a failure."""
+    if "\n" in command or "$(" in command or "`" in command:
+        return None
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return None
+    if any(t in ("&&", "||", ";", "&", ";;", "(", ")") for t in toks):
+        return None
+    stages, cur = [], []
+    for t in toks:
+        if t in ("|", "|&"):
+            stages.append(cur)
+            cur = []
+        else:
+            cur.append(t)
+    stages.append(cur)
+    for i, st in enumerate(stages):
+        words, skip = [], False
+        for j, w in enumerate(st):              # drop redirections (2>/dev/null ...)
+            if skip:
+                skip = False
+                continue
+            if w in _REDIR_OPS:
+                skip = True
+                continue
+            if w.isdigit() and j + 1 < len(st) and st[j + 1] in _REDIR_OPS:
+                continue
+            words.append(w)
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words.pop(0)                         # VAR=x grep ...
+        if not words or os.path.basename(words[0]) not in _GREP_CMDS:
+            continue
+        cmd, args = os.path.basename(words[0]), words[1:]
+        if i > 0 or cmd == "rg":                 # piped input, or rg (searches cwd)
+            return "pipeline"
+        pat_from_opt, recursive, operands, k, opts_done = False, False, [], 0, False
+        while k < len(args):
+            a = args[k]
+            k += 1
+            if opts_done or a == "-" or not a.startswith("-"):
+                operands.append(a)
+            elif a == "--":
+                opts_done = True
+            elif a.startswith("--"):             # long option
+                name = a.split("=", 1)[0]
+                if name in ("--regexp", "--file"):
+                    pat_from_opt = True
+                if name in ("--recursive", "--dereference-recursive"):
+                    recursive = True
+                if name in _GREP_ARG_OPTS and "=" not in a:
+                    k += 1                       # its value is the next word
+            else:                                # short cluster, e.g. -rni or -e PAT
+                for ci, ch in enumerate(a[1:]):
+                    if ch in "rR":
+                        recursive = True
+                    if ch in "efmABC":
+                        pat_from_opt = pat_from_opt or ch in "ef"
+                        if ci == len(a) - 2:     # value not attached -> next word
+                            k += 1
+                        break
+        files = operands if pat_from_opt else operands[1:]
+        return "pipeline" if (files or recursive) else "no_file"
+    return None
+
+
+def _run_and_wrap(command, host, timeout, label, grep_shape=None):
     """Shared tail for run_cmd/run_script: exec + spill-to-host + rc/timeout detection +
     flag scan. `label` is what shows up in the ledger (the command text, or a script
-    description) so the two tools can phrase their summary differently."""
+    description) so the two tools can phrase their summary differently. `grep_shape`
+    (run_cmd only, see _grep_shape) lets an empty exit-1 grep be read as NO MATCH."""
     if host == "windows":
         # real tree-killing timeout + the true exit code (see remote.win_run_bounded)
         out, err = remote.win_run_bounded(command, timeout)
@@ -963,6 +1060,12 @@ def _run_and_wrap(command, host, timeout, label):
     # this exit code, which pushed the run into an escalation it did not need.
     if rc == 141 and combined.strip():
         rc = 0
+    no_match = no_file = False
+    if not timed_out and rc == 1 and not combined.strip():
+        if grep_shape == "pipeline":
+            rc, no_match = 0, True           # searched, found nothing: a measurement
+        elif grep_shape == "no_file":
+            no_file = True
     n = len(combined)
     sl, saved = _spill(host, combined, "cmd_out")
     if newfiles:
@@ -974,14 +1077,28 @@ def _run_and_wrap(command, host, timeout, label):
     why = (f"TIMEOUT (killed after {int(timeout)}s on the VM - pass a larger "
            f"`timeout` if the work is genuinely long, e.g. an install or Ghidra), "
            if timed_out else
+           "exit 1 because grep was given NO FILE to search - it read an empty stdin. "
+           "Add the file name (cwd is samples/), e.g. `grep -n PATTERN <file>`; "
+           if no_file else
            "shell aborted before finishing (syntax error?), " if rc is None else
            f"exit {rc}, " if failed else "")
     known_fact = f"{label} -> {sl[:180]}"
+    if no_match:
+        # A negative result is a MEASURED fact ("this pattern is not in that data").
+        # No `info`: it adds no new text, so repeating searches that come back empty
+        # still reaches the stall threshold (design rule: two empty static looks ->
+        # change the KIND of approach) instead of the tool-error budget.
+        known_fact = (f"{label} -> NO MATCH (grep exit 1 = the search ran and found "
+                      "nothing; this is a result, not an error)")
     if newfiles:
         known_fact += " | wrote " + ", ".join(f"samples/{fn} ({fsz}B)"
                                               for fn, fsz in newfiles[:8])
     if saved:
         known_fact += f" (full -> {saved}, page with read_file)"
+    if no_match:
+        return ToolResult(True, f"ran on {host}: {label} -> NO MATCH (grep exit 1: "
+                                "searched, found nothing)", detail="", known=[known_fact],
+                          info="")
     return ToolResult(
         not failed,
         f"ran on {host}: {label} -> {why}{n} chars" + ("; FLAG" if flag else ""),
@@ -1022,7 +1139,8 @@ def run_cmd(ws, command, host="kali", timeout=20):
         return ToolResult(False, f"blocked: this command touches {blocked}, which is "
                                  "not permitted (see tool description) - it is never "
                                  "needed to solve a challenge; find another way.")
-    return _run_and_wrap(command, host, timeout, f"`{command[:55]}`")
+    return _run_and_wrap(command, host, timeout, _cmd_label(command),
+                         grep_shape=_grep_shape(command) if host != "windows" else None)
 
 
 @tool("run_script",

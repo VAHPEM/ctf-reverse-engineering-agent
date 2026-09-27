@@ -9,11 +9,12 @@ when the budget is spent). Never guesses.
 """
 import os
 import json
+import time
 import re
 import inspect
 import traceback
 from .workspace import Workspace
-from . import tools, reasoner, config
+from . import tools, reasoner, config, metrics
 
 
 def _dump_state(ws, step, reason=None):
@@ -123,7 +124,7 @@ def _missing_required(name, args):
             miss.append(pn)
     return miss
 
-def _acquire_action(ws, state, catalog, step, img):
+def _acquire_action(ws, state, catalog, step, img, parts=None):
     """Get ONE well-formed action (tool in TOOLS, required args present), or None.
 
     Every malformed reply - a non-object, an empty object, an unknown tool, non-object
@@ -143,7 +144,8 @@ def _acquire_action(ws, state, catalog, step, img):
     for attempt in range(3):
         try:
             if attempt == 0:
-                action = reasoner.decide(state, catalog, tier=ws.tier, image=img)
+                action = reasoner.decide(state, catalog, tier=ws.tier, image=img,
+                                         parts=parts)
             else:
                 # strict + a specific correction; minimal state on the last try (the 12KB
                 # of observations is the likeliest reason the model wandered off format)
@@ -316,7 +318,8 @@ def solve(files, max_steps=None, resume=None):
 
     for step in range(1, max_steps + 1):
         ws.step = step
-        state = ws.render_state()
+        parts = ws.render_state_parts()      # (cacheable head pieces, tail)
+        state = "".join(parts[0]) + parts[1]
         catalog = tools.catalog()
         if config.MAX_RUN_TOKENS:
             # Would THIS step's Brain call fit? (checking `spent >= MAX` after the fact
@@ -331,12 +334,15 @@ def solve(files, max_steps=None, resume=None):
                                  f"may bill up to ~{est:,} - stopping BEFORE it; resume "
                                  "with --resume once you decide to spend more")
         print(f"\n==== STEP {step}/{max_steps}  [tier={ws.tier}] ====")
+        metrics.begin_step(step, state, ws.tier)      # measurement only (step 0)
 
         img, ws.last_image = ws.last_image, None    # one-shot: use it once, then forget it
         if img:
             print("   [image] attaching one extracted image to this decide() call")
         try:
-            action, want_escalate = _acquire_action(ws, state, catalog, step, img)
+            action, want_escalate = _acquire_action(ws, state, catalog, step, img,
+                                                    parts=parts)
+            metrics.brain_done()
         except Exception as e:  # noqa: BLE001 - a Brain-call failure is unrecoverable
             return _stop(ws, f"Brain call failed after retries ({e.__class__.__name__}: "
                              f"{str(e)[:200]}) - ledger saved to {config.STATE_DUMP}")
@@ -374,12 +380,14 @@ def solve(files, max_steps=None, resume=None):
         redundant = last_seen is not None
         allowed = set(tools.TOOLS[name]["args"].keys())
         kwargs = {k: v for k, v in args.items() if k in allowed}
+        _t_tool = time.time()
         try:
             res = tools.TOOLS[name]["fn"](ws, **kwargs)
         except Exception as e:  # noqa: BLE001 - a tool crash is a FAILED STEP, not a
             # dead run. Before 2026-09-22 only TypeError was caught, so an SSH drop,
             # an SFTP error or a struct.error inside a tool killed the whole run and
             # threw away every measured fact.
+            metrics.tool_done(name, time.time() - _t_tool, False)
             kind = "bad args for" if isinstance(e, TypeError) else "crash in"
             detail = f"{e.__class__.__name__}: {e}"
             print(f"   !! {kind} {name}: {detail}")
@@ -403,6 +411,8 @@ def solve(files, max_steps=None, resume=None):
                 tool_err = 0
             continue
 
+        metrics.tool_done(name, time.time() - _t_tool, res.ok,
+                          len(res.detail or "") + len(getattr(res, "info", None) or ""))
         # Stamp the inspection signature only now that the tool actually ANSWERED.
         # Stamping it before dispatch meant a crashed call (SSH drop, SFTP error) still
         # recorded "you looked at this", so the retry - the first call that really

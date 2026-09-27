@@ -54,6 +54,11 @@ class Ledger:
             self.pinned.add(fact)
         over = len(self.known) - config.KNOWN_CAP
         if over > 0:                      # drop the OLDEST unpinned facts only
+            # ...in a BATCH (down to CAP - KNOWN_EVICT_BATCH), not one per step: KNOWN
+            # is the cached head of the user message (render_state_parts), and every
+            # eviction rewrites that head from its first fact. One-at-a-time eviction
+            # would miss the cache on EVERY step once the cap is reached.
+            over += config.KNOWN_EVICT_BATCH
             kept, dropped = [], 0
             for f in self.known:
                 if dropped < over and f not in self.pinned:
@@ -92,6 +97,21 @@ class Ledger:
         if len(self.assumed) > config.ASSUMED_CAP:
             self.assumed = self.assumed[-config.ASSUMED_CAP:]
         return True
+
+    def render_parts(self):
+        """render() split for prompt caching: (known_pieces, rest) with
+        "".join(known_pieces) + rest == render(). One piece per KNOWN fact, each piece
+        byte-identical from step to step (KNOWN only grows at the end), so the API finds
+        the previous step's cached prefix at a piece boundary."""
+        if self.known:
+            pieces = ["KNOWN (measured):\n  - " + self.known[0]]
+            pieces += ["\n  - " + x for x in self.known[1:]]
+        else:
+            pieces = ["KNOWN (measured): (none)"]
+        full = self.render()
+        head = "".join(pieces)
+        assert full.startswith(head)
+        return pieces, full[len(head):]
 
     def render(self):
         def block(title, items):
@@ -245,7 +265,13 @@ class Workspace:
         self.observations.append((label, text[:cap or config.OBS_CAP_NEWEST]))
         self.observations = self.observations[-keep:]
 
-    def render_state(self, minimal=False):
+    def render_state_parts(self):
+        """(head_pieces, tail) of the full state; "".join(head_pieces) + tail is
+        exactly render_state(). The head (ARTIFACTS + KNOWN) changes rarely and only
+        grows at its end, so reasoner.decide() sends it as a cached prefix."""
+        return self.render_state(parts=True)
+
+    def render_state(self, minimal=False, parts=False):
         arts = "\n".join(
             f"  - {a.name}  [kind={a.kind}]"
             + (f"  remote={a.remote_path}" if a.remote_path else "")
@@ -285,14 +311,22 @@ class Workspace:
                 "(Observations were left out of this prompt on purpose. Choose the next "
                 "action from the facts above and reply with ONE JSON object.)"
             )
-        nudge = (f"=== !! STUCK - CHANGE APPROACH ===\n{self.strategic_nudge}\n\n"
+        # ORDER = most stable first (2026-09-27, prompt caching of the user message).
+        # ARTIFACTS + KNOWN form the cacheable head; everything that changes every step
+        # (ASSUMED is a sliding window of the newest notes, RULED OUT is capped the same
+        # way, observations, actions, the stall nudge) comes after it. The nudge used to
+        # sit FIRST, which would change the very first bytes of the prompt whenever it
+        # appeared; it now closes the prompt, right before the reply instruction.
+        known_pieces, ledger_rest = self.ledger.render_parts()
+        head = ["=== ARTIFACTS ===\n" + arts + "\n\n=== LEDGER ===\n" + known_pieces[0]]
+        head += known_pieces[1:]
+        nudge = (f"\n\n=== !! STUCK - CHANGE APPROACH ===\n{self.strategic_nudge}"
                  if self.strategic_nudge else "")
-        return (
-            nudge +
-            "=== ARTIFACTS ===\n" + arts + "\n\n"
-            "=== LEDGER ===\n" + self.ledger.render() + "\n\n"
+        tail = (
+            ledger_rest + "\n\n"
             "=== RECENT OBSERVATIONS (what you just saw; do not re-read what is "
             "still printed here in full - a block marked as trimmed IS worth "
             "re-reading with peek/read_file) ===\n" + obs + "\n\n"
-            "=== RECENT ACTIONS ===\n" + recent
+            "=== RECENT ACTIONS ===\n" + recent + nudge
         )
+        return (head, tail) if parts else "".join(head) + tail
