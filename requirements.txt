@@ -1,0 +1,10 @@
+# CTF orchestrator dependencies (both variants)
+ollama
+paramiko
+python-dotenv
+py7zr
+langgraph        # variant1 only
+anthropic        # P3: Brain via Claude API
+openai           # P3: Brain via OpenAI API
+pillow
+pymupdf

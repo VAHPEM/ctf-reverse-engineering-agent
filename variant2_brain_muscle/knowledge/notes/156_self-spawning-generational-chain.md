@@ -1,0 +1,5 @@
+---
+tags: Self-spawning generational chain
+source: distilled/playbook
+---
+A binary that writes and launches the NEXT copy of itself (e.g. unholydragon.exe -> unholydragon1.exe -> ... -> unholydragonN.exe) with the flag only in the FINAL generation is a generational chain — do NOT open the spawned files one by one. Two ways to reach the end: (1) DRIVE it — author_and_run/job_start a loop that runs the current generation, waits, finds the newly-created next exe, repeats until no new child appears (or an @flare-on.com string shows), on the host the exe targets (host='windows' for a PE) and as a background job (job_start/job_poll) because the chain can be hundreds deep and will blow a single tool timeout; (2) EMULATE — most chains mutate by a single byte-patch per generation (an xor/add over the compare or the embedded flag), so reproduce that one transform N times offline in ONE script and print the result. Watch disk: N copies x file size can fill the VM — delete each generation after reading it, or emulate instead of spawning.

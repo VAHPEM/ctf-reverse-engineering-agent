@@ -1,0 +1,49 @@
+# Python toolbox for the ANALYSIS VMs (mainly the Kali venv at ~/ctf-venv).
+# These are what the Brain's solver scripts (author_and_run / run_script) import.
+# Install on the VM, NOT on the orchestrator host:  ~/ctf-venv/bin/pip install -r requirements-vm.txt
+# The agent probes for these at startup and degrades gracefully if some are missing.
+
+# --- disassembly / lifting / emulation ---
+capstone
+unicorn
+angr
+r2pipe
+
+# --- binary parsing (PE / ELF / Mach-O / .NET) ---
+pefile
+lief
+pyelftools          # import name: elftools
+macholib
+dnfile
+dncil
+minidump
+
+# --- solving / crypto ---
+z3-solver           # import name: z3
+pycryptodome        # import name: Crypto
+pycryptodomex       # import name: Cryptodome (optional; some scripts use this name)
+cryptography
+pwntools            # import name: pwn
+
+# --- python bytecode (PyInstaller / .pyc challenges) ---
+xdis
+uncompyle6
+decompyle3
+
+# --- data / images / pcap / documents ---
+numpy
+pillow              # import name: PIL
+pymupdf             # import name: fitz
+scapy
+requests
+zxing-cpp           # import name: zxingcpp (QR / barcodes)
+oletools
+olefile
+yara-python         # import name: yara
+
+# --- malware triage (FLARE tooling) ---
+flare-capa          # import name: capa
+flare-floss         # provides the `floss` CLI
+
+# --- dynamic instrumentation (also install the Frida CLI on the Windows VM) ---
+frida
