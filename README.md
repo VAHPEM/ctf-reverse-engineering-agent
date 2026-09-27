@@ -23,8 +23,10 @@ It has been tested and used in practice on:
 
 ## Table of contents
 
-1. [How it works](#how-it-works)
-2. [The two variants](#the-two-variants)
+1. [The two variants](#the-two-variants)
+2. [How it works](#how-it-works)
+   - [variant2 — Brain + Muscle](#variant2--brain--muscle-active)
+   - [variant1 — multi-node pipeline](#variant1--multi-node-pipeline-legacy)
 3. [The Muscle toolset](#the-muscle-toolset)
 4. [The recall knowledge base](#the-recall-knowledge-base)
 5. [Repository layout](#repository-layout)
@@ -42,7 +44,30 @@ It has been tested and used in practice on:
 
 ---
 
+## The two variants
+
+A deliberate cost-vs-capability trade-off:
+
+| | **variant2** — 1 Brain + 1 Muscle | **variant1** — multi-node pipeline |
+|---|---|---|
+| Idea | one strong **API** model decides everything | fixed LangGraph of cheap/**local** models per role (triage → planner → coder → executor → evaluator) |
+| Token cost | higher (a capable model does every step) | **lower** — cheap/local models, few or no API tokens |
+| Hardware | light locally (reasoning is in the cloud) | **needs a strong machine** so the local model (the "muscle") is actually capable |
+| Status | **active & proven** — FLARE-On 12 (1–8), FLARE-On 13 (1–9) | the original idea; **not yet well-refined**, kept for A/B comparison |
+
+**`variant2_brain_muscle/` is the active design.** `variant1_multinode/` came first — it
+trades API tokens for local compute, so it is cheaper to run but only as good as the local
+model your hardware can host, and it has not yet been polished to the same level. Their
+workflows are described side by side below.
+
+---
+
 ## How it works
+
+The two variants take opposite approaches to the same loop. **variant2** (active) puts one
+strong model in charge; **variant1** (legacy) splits the work across cheap local models.
+
+### variant2 — Brain + Muscle (active)
 
 ```
                  think → act → observe  (loop over a compressed Ledger)
@@ -76,28 +101,11 @@ It has been tested and used in practice on:
   is what has been tested in practice; the OpenAI path is implemented but not yet exercised
   end-to-end** (see `variant2_brain_muscle/smoke_openai.py` for a standalone check).
 
----
+### variant1 — multi-node pipeline (legacy)
 
-## The two variants
-
-A deliberate cost-vs-capability trade-off:
-
-| | **variant2** — 1 Brain + 1 Muscle | **variant1** — multi-node pipeline |
-|---|---|---|
-| Idea | one strong **API** model decides everything | fixed LangGraph of cheap/**local** models per role (triage → planner → coder → executor → evaluator) |
-| Token cost | higher (a capable model does every step) | **lower** — cheap/local models, few or no API tokens |
-| Hardware | light locally (reasoning is in the cloud) | **needs a strong machine** so the local model (the "muscle") is actually capable |
-| Status | **active & proven** — FLARE-On 12 (1–8), FLARE-On 13 (1–9) | the original idea; **not yet well-refined**, kept for A/B comparison |
-
-**`variant2_brain_muscle/` is the active design.** `variant1_multinode/` came first — it
-trades API tokens for local compute, so it is cheaper to run but only as good as the local
-model your hardware can host, and it has not yet been polished to the same level.
-
-### variant1 workflow (multi-node pipeline)
-
-variant1 is a fixed [LangGraph](https://github.com/langchain-ai/langgraph) state machine
-where each role is a **separate node running a cheap/local model** (default
-`qwen2.5-coder:7b` via ollama):
+A fixed [LangGraph](https://github.com/langchain-ai/langgraph) state machine where each
+role is a **separate node running a cheap/local model** (default `qwen2.5-coder:7b` via
+ollama):
 
 ```
   ┌────────┐   ┌─────────┐   ┌───────┐   ┌──────────┐   ┌───────────┐
@@ -119,11 +127,9 @@ where each role is a **separate node running a cheap/local model** (default
 - **evaluator** — scan for the flag, then route back to **coder** (fix the code) or
   **planner** (try another strategy) until the flag is found or the step budget is spent.
 
-Each stage is one cheap model call, so a run costs far fewer tokens than variant2's single
-strong model — but every stage is only as capable as the local model, which is why it
-needs strong hardware and is less robust on hard challenges. Contrast this with variant2's
-single [think → act → observe loop](#how-it-works), where one strong model plays every
-role over a shared Ledger. Entry point: `variant1_multinode/graph_skeleton.py`
+Each stage is one cheap model call, so a run costs far fewer tokens than variant2 — but
+every stage is only as capable as the local model, which is why it needs strong hardware
+and is less robust on hard challenges. Entry point: `variant1_multinode/graph_skeleton.py`
 (see [Running it](#running-it)).
 
 ---
