@@ -51,6 +51,17 @@ R8 MEASURE BEFORE YOU READ. For binaries from unusual compilers (VB6/twinBASIC,
    management. Prefer: run twice and diff, diff states byte by byte, count what
    changed and in which section — BEFORE reading assembly.
 
+R9 THE OBVIOUS FLAG CAN BE A DECOY. A string shown at the "win"/success screen may be
+   bait - verify the flag DOMAIN character by character (f1are != flare) and be suspicious
+   when the win path is trivially reachable; the real flag often sits on a hidden/unused
+   code path (a registered-but-uncalled handler, a branch the happy path never takes).
+
+R10 EMBEDDED RUNTIME => GO DYNAMIC. When the target embeds its own engine (V8/JS via
+   Tauri/Electron/nexe, a WASM module, a bundled Python/Lua, a big Go/Rust host), the check
+   logic runs at RUNTIME, not in the host's static code, and Ghidra will time out on the
+   size. Break in a debugger or run the payload in its own engine, and prefer REPLACING the
+   script/input at the load boundary to measure native functions as black boxes.
+
 === DEFAULT ORDER OF OPERATIONS — cheapest first ===
 Start with the cheap static survey below. Reach for dynamic analysis (running it,
 a debugger, emulation) AS SOON AS static reading stops answering the question:

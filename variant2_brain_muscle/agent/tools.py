@@ -347,6 +347,37 @@ def _binary_survey(a, q):
         facts.append(f"{a.name}: imports: {len(imps)} from " + ", ".join(
             f"{lib}({len(ns)})" for lib, ns in
             sorted(groups.items(), key=lambda kv: -len(kv[1]))[:12]))
+    # --- embedded-runtime & big-binary guard (ch8 crux + ch9 neon_outrun lesson): both
+    # were 15-21MB hosts whose real logic lived in an embedded VM (WASM / V8), where the
+    # agent ground static tooling for dozens of steps instead of going dynamic. Cheap:
+    # one wc -c beyond what we already read; raw signals only, no interpretation. ---
+    _hl = (info + " " + libs).lower()
+    _rt = []
+    if "javascriptcore" in _hl or "libv8" in _hl:  _rt.append("V8/JS engine")
+    if "webkit" in _hl or "tauri" in _hl:          _rt.append("Tauri/webkit webview")
+    if "electron" in _hl:                          _rt.append("Electron")
+    _sz, _ = remote.ssh_exec(f"wc -c < {q} 2>/dev/null", read_timeout=15)
+    try:
+        _nb = int(_sz.strip())
+    except ValueError:
+        _nb = 0
+    if _rt or _nb >= 8 * 1024 * 1024:
+        _h = []
+        if _rt:
+            _h.append("embedded runtime (" + ", ".join(sorted(set(_rt))) + "): the real "
+                      "logic runs INSIDE that runtime, not in this host binary\'s static "
+                      "code - go DYNAMIC early (linux_gdb / win_frida, or run the payload "
+                      "in its own engine) and try replacing the script/input at the load "
+                      "boundary to measure native functions as black boxes (recall: "
+                      "embedded-runtime)")
+        if _nb >= 8 * 1024 * 1024:
+            _h.append(f"large binary (~{_nb // (1024*1024)}MB): Ghidra full-analysis "
+                      "likely TIMES OUT - prefer targeted r2 (pdf/axt @ addr) or "
+                      "ghidra_script on ONE function, or go dynamic, over pe_overview")
+        _line = f"{a.name}: " + " | ".join(_h)
+        parts.append("[triage guard]\n" + _line)
+        facts.append(_line)
+
     # The ledger is re-sent UNCACHED on every step (it is the fresh user message), so a
     # long KNOWN line is paid ~60 times per run. Measured: an ELF's sections line came to
     # ~800 chars. The full text stays in the detail and in the saved file.

@@ -93,6 +93,39 @@ A deliberate cost-vs-capability trade-off:
 trades API tokens for local compute, so it is cheaper to run but only as good as the local
 model your hardware can host, and it has not yet been polished to the same level.
 
+### variant1 workflow (multi-node pipeline)
+
+variant1 is a fixed [LangGraph](https://github.com/langchain-ai/langgraph) state machine
+where each role is a **separate node running a cheap/local model** (default
+`qwen2.5-coder:7b` via ollama):
+
+```
+  ┌────────┐   ┌─────────┐   ┌───────┐   ┌──────────┐   ┌───────────┐
+  │ triage │──►│ planner │──►│ coder │──►│ executor │──►│ evaluator │
+  └────────┘   └─────────┘   └───────┘   └──────────┘   └─────┬─────┘
+                    ▲             ▲            ▲              │
+                    │             │  retry the code          │
+                    │             └──────────────────────────┤
+                    │        try another strategy            │
+                    └────────────────────────────────────────┘
+                         (loops until solved or budget spent)
+```
+
+- **triage** — survey the file (type, strings) on the Kali VM.
+- **planner** — pick a strategy from a fixed menu; on a malformed reply it re-asks once,
+  more strictly.
+- **coder** — write the solver / command for the chosen strategy.
+- **executor** — run it on the VM and capture the output.
+- **evaluator** — scan for the flag, then route back to **coder** (fix the code) or
+  **planner** (try another strategy) until the flag is found or the step budget is spent.
+
+Each stage is one cheap model call, so a run costs far fewer tokens than variant2's single
+strong model — but every stage is only as capable as the local model, which is why it
+needs strong hardware and is less robust on hard challenges. Contrast this with variant2's
+single [think → act → observe loop](#how-it-works), where one strong model plays every
+role over a shared Ledger. Entry point: `variant1_multinode/graph_skeleton.py`
+(see [Running it](#running-it)).
+
 ---
 
 ## The Muscle toolset
