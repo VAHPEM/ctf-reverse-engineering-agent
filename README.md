@@ -1,4 +1,7 @@
-# ctf-brain
+# ctf-brain — CTF Reverse-Engineering Agent
+
+> Repository: [`ctf-reverse-engineering-agent`](https://github.com/<your-username>/ctf-reverse-engineering-agent)
+> · project name: **ctf-brain**
 
 **An autonomous agent that solves CTF reverse-engineering challenges.** It is built and
 tuned specifically for RE puzzles (unpacking, decompiling, debugging, emulating, defeating
@@ -212,9 +215,12 @@ This section assumes you have never seen the repo before.
 ### 2. Clone the repo
 
 ```bash
-git clone <your-fork-url> ctf-brain
+git clone https://github.com/<your-username>/ctf-reverse-engineering-agent.git ctf-brain
 cd ctf-brain
 ```
+
+Cloning into a folder named `ctf-brain` keeps every path in this README (`ctf-brain/…`,
+`/path/to/ctf-brain/requirements-vm.txt`) valid as written.
 
 ### 3. Python dependencies
 
